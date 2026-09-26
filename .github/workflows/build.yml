@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout Source Code
@@ -16,30 +16,32 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc bison flex libssl-dev libncurses5-dev libncurses-dev zip libgnutls28-dev python3 python-is-python3 binutils binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi clang lld llvm
+          sudo apt-get install -y build-essential bc bison flex libssl-dev libncurses5-dev libncurses-dev zip libgnutls28-dev clang lld gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
       - name: Download AOSP Clang & GCC
         run: |
-          git clone https://gitlab.com/arter97/arm64-gcc --depth=1 gcc64
-          git clone https://gitlab.com/arter97/arm-gcc --depth=1 gcc32
+          mkdir -p "$GITHUB_WORKSPACE/gcc64/bin" "$GITHUB_WORKSPACE/gcc32/bin"
+          ln -sf /usr/bin/aarch64-linux-gnu-* "$GITHUB_WORKSPACE/gcc64/bin/" || true
+          ln -sf /usr/bin/arm-linux-gnueabi-* "$GITHUB_WORKSPACE/gcc32/bin/" || true
+          echo "Toolchain ready"
 
       - name: Inject Missing Phoenix Headers
         run: |
           mkdir -p include/linux include/oppo include/soc/oppo
-          cat << 'EOF' > include/linux/oppo_phoenix.h
-          #ifndef _OPPO_PHOENIX_H
-          #define _OPPO_PHOENIX_H
+          cat > include/linux/oppo_phoenix.h <<'EOF'
+          #ifndef OPPO_PHOENIX_H
+          #define OPPO_PHOENIX_H
           #include <linux/types.h>
           #define ERROR_KERNEL_PANIC 0
           #define ERROR_HNT 0
-          #define ERROR_HINT 0
+          #define ERROR_HNIT 0
           static inline int phx_set_boot_stage(int stage) { return 0; }
           static inline int phx_set_boot_error(int error) { return 0; }
           static inline int phx_set_boot_info(int info) { return 0; }
           #endif
           EOF
-          cp include/linux/oppo_phoenix.h include/oppo/oppo_phoenix.h 2>/dev/null || true
-          cp include/linux/oppo_phoenix.h include/soc/oppo/oppo_phoenix.h 2>/dev/null || true
+          cp include/linux/oppo_phoenix.h include/oppo/oppo_phoenix.h || true
+          cp include/linux/oppo_phoenix.h include/soc/oppo/oppo_phoenix.h || true
 
       - name: Compile Kernel
         run: |
@@ -48,12 +50,9 @@ jobs:
           export PATH="$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/gcc32/bin:/usr/bin:$PATH"
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-
           make O=out RMX1821_defconfig
-          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config 2>/dev/null || true
-
-          PHOENIX_H="$GITHUB_WORKSPACE/include/linux/oppo_phoenix.h"
-          make -j$(nproc --all) O=out CC=clang HOSTCC=clang KCFLAGS="-Wno-error -w -fno-stack-protector -fcommon -DERROR_HNT=0 -include ${PHOENIX_H}"
+          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config || true
+          make -j"$(nproc)" O=out CC=clang HOSTCC=clang KCFI=0
 
       - name: Upload Kernel Artifact
         uses: actions/upload-artifact@v4
