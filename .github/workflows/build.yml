@@ -5,21 +5,16 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
-      - name: Install Build Dependencies & Linker
+      - name: Install Dependencies & Cross Compilers
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc bison flex libssl-dev libncurses5-dev libncurses-dev zip libgnutls28-dev python3 python-is-python3 binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi g++-aarch64-linux-gnu gcc-aarch64-linux-gnu
-
-      - name: Download GCC Toolchains (4.9)
-        run: |
-          git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 --depth=1 gcc64
-          git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 --depth=1 gcc32
+          sudo apt-get install -y build-essential bc bison flex libssl-dev libncurses5-dev libncurses-dev zip libgnutls28-dev python3 python-is-python3 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu gcc-arm-linux-gnueabi g++-arm-linux-gnueabi
 
       - name: Ensure Kernel Sublevel 186
         run: |
@@ -27,19 +22,18 @@ jobs:
 
       - name: Compile Kernel
         run: |
-          export PATH="$(pwd)/gcc64/bin:$(pwd)/gcc32/bin:/usr/bin:$PATH"
           export ARCH=arm64
           export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-          # Apply defconfig
+          # Apply RMX1821 defconfig
           make O=out RMX1821_defconfig
 
-          # Disable stack protector to prevent build failure
+          # Disable stack protector conflict
           sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config 2>/dev/null || true
           
-          # Build
+          # Compile
           make -j$(nproc --all) O=out KCFLAGS="-Wno-error -w -fno-stack-protector -fcommon"
 
       - name: Upload Kernel Artifact
