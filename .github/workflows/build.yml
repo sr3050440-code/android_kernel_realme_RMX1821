@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Source Code
@@ -43,13 +43,13 @@ jobs:
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
-          export CROSS_COMPILE=$(pwd)/gcc64/bin/aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=$(pwd)/gcc32/bin/arm-linux-androideabi-
+          export CROSS_COMPILE=$GITHUB_WORKSPACE/gcc64/bin/aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/gcc32/bin/arm-linux-androideabi-
 
           make O=out RMX1821_defconfig
           sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config 2>/dev/null || true
 
-          PHOENIX_H="$(pwd)/include/linux/oppo_phoenix.h"
+          PHOENIX_H="$GITHUB_WORKSPACE/include/linux/oppo_phoenix.h"
           make -j$(nproc --all) O=out KCFLAGS="-Wno-error -w -fno-stack-protector -fcommon -DERROR_HNT=0 -include ${PHOENIX_H}" HOSTCC=/usr/bin/gcc HOSTCXX=/usr/bin/g++ HOSTLD=/usr/bin/ld
 
       - name: Upload Kernel Artifact
