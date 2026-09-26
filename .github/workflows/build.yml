@@ -19,8 +19,18 @@ jobs:
           sudo apt-get install -y build-essential bc bison flex libssl-dev libncurses5-dev libncurses-dev zip unzip libgnutls28-dev clang lld gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi python2 python2.7
           sudo ln -sf /usr/bin/python2.7 /usr/bin/python2
           python2 --version
-          chmod +x tools/dct/DrvGen.py
+          python2.7 --version
+
+      - name: Prepare Source
+        run: |
+          git config --global core.autocrlf false
           test -f tools/dct/DrvGen.py
+          sed -i 's/\r$//' tools/dct/DrvGen.py
+          chmod +x tools/dct/DrvGen.py
+          mkdir -p include/linux
+          [ -f include/linux/phoenix.h ] || touch include/linux/phoenix.h
+          [ -f include/linux/phoenix_kcompat.h ] || touch include/linux/phoenix_kcompat.h
+          head -n 3 tools/dct/DrvGen.py
 
       - name: Setup Cross Compilers
         run: |
@@ -31,15 +41,9 @@ jobs:
           for x in /usr/bin/arm-linux-gnueabi-*; do
             [ -e "$x" ] && ln -sf "$x" gcc32/bin/
           done
-
-      - name: Prepare Source
-        run: |
-          git config --global core.autocrlf false
-          sed -i 's/\r$//' tools/dct/DrvGen.py
-          chmod +x tools/dct/DrvGen.py
-          mkdir -p include/linux
-          [ -f include/linux/phoenix.h ] || touch include/linux/phoenix.h
-          [ -f include/linux/phoenix_kcompat.h ] || touch include/linux/phoenix_kcompat.h
+          aarch64-linux-gnu-gcc --version
+          arm-linux-gnueabi-gcc --version
+          clang --version
 
       - name: Configure Kernel
         run: |
@@ -54,8 +58,10 @@ jobs:
           echo '# CONFIG_DEBUG_INFO is not set' >> out/.config
           make O=out olddefconfig
           test -f out/.config
+          echo "===== CONFIGURATION READY ====="
 
       - name: Compile Kernel
+        shell: bash
         run: |
           export ARCH=arm64
           export SUBARCH=arm64
@@ -63,17 +69,31 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export PYTHON=python2.7
+          echo "========================================"
+          echo "       REALME 3i KERNEL BUILD"
+          echo "========================================"
+          echo "Build started: $(date)"
+          echo ""
           set +e
-          make -j"$(nproc)" O=out CC=clang HOSTCC=clang PYTHON=python2.7 KCFI=0 > build.log 2>&1
-          status=$?
+          make -j"$(nproc)" O=out CC=clang HOSTCC=clang PYTHON=python2.7 KCFI=0 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          echo ""
+          echo "Build finished: $(date)"
           if [ "$status" -ne 0 ]; then
-            echo "===== KERNEL BUILD FAILED ====="
-            grep -Ei "error:|fatal:|not found|undefined reference|No such file|Error [0-9]+" build.log | tail -n 100
-            echo "===== LAST 100 LOG LINES ====="
+            echo "========================================"
+            echo "          KERNEL BUILD FAILED"
+            echo "========================================"
+            echo ""
+            echo "===== ERRORS ====="
+            grep -Ei "error:|fatal:|undefined reference|No such file|not found|Error [0-9]+" build.log | tail -n 100 || true
+            echo ""
+            echo "===== LAST 100 LINES ====="
             tail -n 100 build.log
             exit "$status"
           fi
-          echo "===== KERNEL BUILD SUCCESS ====="
+          echo "========================================"
+          echo "          KERNEL BUILD SUCCESS"
+          echo "========================================"
           find out/arch/arm64/boot -maxdepth 1 -type f -printf '%f\n'
 
       - name: Collect Kernel
@@ -86,6 +106,7 @@ jobs:
           done
           find out/arch/arm64/boot/dts -type f -name "*.dtb" -exec cp {} kernel-output/ \; 2>/dev/null || true
           cp build.log kernel-output/
+          echo "===== OUTPUT FILES ====="
           ls -lh kernel-output
           test "$(find kernel-output -maxdepth 1 -type f ! -name build.log | wc -l)" -gt 0
 
@@ -94,6 +115,7 @@ jobs:
           cd kernel-output
           zip -9 ../Realme3i-Kernel.zip *
           cd ..
+          echo "===== KERNEL ZIP ====="
           ls -lh Realme3i-Kernel.zip
 
       - name: Upload Kernel
@@ -102,4 +124,4 @@ jobs:
           name: Realme3i-Kernel
           path: |
             Realme3i-Kernel.zip
-            kernel-output/*
+            kernel-output/build.log
