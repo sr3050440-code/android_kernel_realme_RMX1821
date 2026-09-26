@@ -21,6 +21,10 @@ jobs:
           git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 --depth=1 gcc64
           git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 --depth=1 gcc32
 
+      - name: Set Kernel Sublevel to 186
+        run: |
+          sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 186/' Makefile
+
       - name: Inject Missing Phoenix Headers
         run: |
           mkdir -p include/linux include/oppo include/soc/oppo
@@ -49,20 +53,20 @@ jobs:
           export HOSTCC=gcc
           export HOSTCXX=g++
 
-          # Apply defconfig
+          # Apply RMX1821 defconfig
           make O=out RMX1821_defconfig
 
           # Disable stack protector conflict
           sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config 2>/dev/null || true
 
-          # Compile
+          # Compile with error-suppression flags
           PHOENIX_H="$(pwd)/include/linux/oppo_phoenix.h"
           make -j$(nproc --all) O=out KCFLAGS="-Wno-error -w -fno-stack-protector -fcommon -DERROR_HNT=0 -include ${PHOENIX_H}"
 
       - name: Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Realme3i-Kernel-Image
+          name: Realme3i-Kernel-4.14.186
           path: |
             out/arch/arm64/boot/Image*
             out/arch/arm64/boot/dts/mediatek/*.dtb
