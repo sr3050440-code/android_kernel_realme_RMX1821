@@ -16,23 +16,44 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bc bison flex libssl-dev libncurses5-dev libncurses-dev zip libgnutls28-dev clang lld gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi python2.7
+          sudo apt-get install -y build-essential bc bison flex libssl-dev libncurses5-dev libncurses-dev zip unzip libgnutls28-dev clang lld gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi python2 python2.7
           sudo ln -sf /usr/bin/python2.7 /usr/bin/python2
-          chmod +x tools/dct/DrvGen.py
           python2 --version
+          chmod +x tools/dct/DrvGen.py
           test -f tools/dct/DrvGen.py
 
       - name: Setup Cross Compilers
         run: |
           mkdir -p gcc64/bin gcc32/bin
-          for x in /usr/bin/aarch64-linux-gnu-*; do ln -sf "$x" gcc64/bin/; done
-          for x in /usr/bin/arm-linux-gnueabi-*; do ln -sf "$x" gcc32/bin/; done
+          for x in /usr/bin/aarch64-linux-gnu-*; do
+            [ -e "$x" ] && ln -sf "$x" gcc64/bin/
+          done
+          for x in /usr/bin/arm-linux-gnueabi-*; do
+            [ -e "$x" ] && ln -sf "$x" gcc32/bin/
+          done
 
-      - name: Inject Missing Phoenix Headers
+      - name: Prepare Source
         run: |
+          git config --global core.autocrlf false
+          sed -i 's/\r$//' tools/dct/DrvGen.py
+          chmod +x tools/dct/DrvGen.py
           mkdir -p include/linux
           [ -f include/linux/phoenix.h ] || touch include/linux/phoenix.h
           [ -f include/linux/phoenix_kcompat.h ] || touch include/linux/phoenix_kcompat.h
+
+      - name: Configure Kernel
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export PYTHON=python2.7
+          make O=out RMX1821_defconfig
+          make O=out olddefconfig
+          sed -i '/^CONFIG_DEBUG_INFO=/d;/^CONFIG_DEBUG_INFO_DWARF/d' out/.config
+          echo '# CONFIG_DEBUG_INFO is not set' >> out/.config
+          make O=out olddefconfig
+          test -f out/.config
 
       - name: Compile Kernel
         run: |
@@ -42,23 +63,43 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export PYTHON=python2.7
-          make O=out RMX1821_defconfig
-          make O=out olddefconfig
-          sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config 2>/dev/null || true
-          make O=out olddefconfig
-          make -j"$(nproc)" O=out CC=clang HOSTCC=clang PYTHON=python2.7 KCFI=0
-          test -f out/arch/arm64/boot/Image
+          set +e
+          make -j"$(nproc)" O=out CC=clang HOSTCC=clang PYTHON=python2.7 KCFI=0 > build.log 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "===== KERNEL BUILD FAILED ====="
+            grep -Ei "error:|fatal:|not found|undefined reference|No such file|Error [0-9]+" build.log | tail -n 100
+            echo "===== LAST 100 LOG LINES ====="
+            tail -n 100 build.log
+            exit "$status"
+          fi
+          echo "===== KERNEL BUILD SUCCESS ====="
+          find out/arch/arm64/boot -maxdepth 1 -type f -printf '%f\n'
+
+      - name: Collect Kernel
+        run: |
+          mkdir -p kernel-output
+          for f in Image Image.gz Image.gz-dtb Image-dtb Image.lz4 Image.lzma Image.xz; do
+            if [ -f "out/arch/arm64/boot/$f" ]; then
+              cp "out/arch/arm64/boot/$f" kernel-output/
+            fi
+          done
+          find out/arch/arm64/boot/dts -type f -name "*.dtb" -exec cp {} kernel-output/ \; 2>/dev/null || true
+          cp build.log kernel-output/
+          ls -lh kernel-output
+          test "$(find kernel-output -maxdepth 1 -type f ! -name build.log | wc -l)" -gt 0
 
       - name: Package Kernel
         run: |
-          mkdir -p AnyKernel3
-          cp out/arch/arm64/boot/Image* AnyKernel3/ 2>/dev/null || true
-          cp out/arch/arm64/boot/dts/mediatek/*.dtb AnyKernel3/ 2>/dev/null || true
-          cd AnyKernel3
-          zip -r ../Realme3i-Kernel.zip ./*
+          cd kernel-output
+          zip -9 ../Realme3i-Kernel.zip *
+          cd ..
+          ls -lh Realme3i-Kernel.zip
 
       - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
           name: Realme3i-Kernel
-          path: Realme3i-Kernel.zip
+          path: |
+            Realme3i-Kernel.zip
+            kernel-output/*
