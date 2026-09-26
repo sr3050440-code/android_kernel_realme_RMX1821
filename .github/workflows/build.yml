@@ -20,7 +20,6 @@ jobs:
           sudo ln -sf /usr/bin/python2.7 /usr/bin/python2
           chmod +x tools/dct/DrvGen.py
           python2 --version
-          test -x /usr/bin/python2
           test -f tools/dct/DrvGen.py
 
       - name: Setup Cross Compilers
@@ -44,8 +43,9 @@ jobs:
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export PYTHON=python2.7
           make O=out RMX1821_defconfig
-          test -f out/.config
+          make O=out olddefconfig
           sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/CONFIG_CC_STACKPROTECTOR_STRONG is not set/' out/.config 2>/dev/null || true
+          make O=out olddefconfig
           make -j"$(nproc)" O=out CC=clang HOSTCC=clang PYTHON=python2.7 KCFI=0
           test -f out/arch/arm64/boot/Image
 
