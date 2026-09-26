@@ -75,7 +75,7 @@ jobs:
           echo "Build started: $(date)"
           echo ""
           set +e
-          make -j"$(nproc)" O=out CC=clang HOSTCC=clang PYTHON=python2.7 KCFI=0 2>&1 | tee build.log
+          make -j"$(nproc)" O=out PYTHON=python2.7 2>&1 | tee build.log
           status=${PIPESTATUS[0]}
           echo ""
           echo "Build finished: $(date)"
