@@ -1,131 +1,499 @@
-name: Build Realme 3i Kernel Final
+name: Build Realme 3i RMX1827 Kernel
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: RMX1827 Kernel Build
     runs-on: ubuntu-22.04
 
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      DEFCONFIG: RMX1821_defconfig
+
     steps:
-      - name: Checkout Source Code
+
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
+      - name: Checkout Q Branch
         uses: actions/checkout@v4
+        with:
+          ref: Q
+          fetch-depth: 1
 
-      - name: Install Dependencies
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential bc bison flex libssl-dev libncurses5-dev libncurses-dev zip unzip libgnutls28-dev clang lld gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi python2 python2.7
-          sudo ln -sf /usr/bin/python2.7 /usr/bin/python2
-          python2 --version
-          python2.7 --version
-
-      - name: Prepare Source
-        run: |
-          git config --global core.autocrlf false
-          test -f tools/dct/DrvGen.py
-          sed -i 's/\r$//' tools/dct/DrvGen.py
-          chmod +x tools/dct/DrvGen.py
-          mkdir -p include/linux
-          [ -f include/linux/phoenix.h ] || touch include/linux/phoenix.h
-          [ -f include/linux/phoenix_kcompat.h ] || touch include/linux/phoenix_kcompat.h
-          head -n 3 tools/dct/DrvGen.py
-
-      - name: Setup Cross Compilers
-        run: |
-          mkdir -p gcc64/bin gcc32/bin
-          for x in /usr/bin/aarch64-linux-gnu-*; do
-            [ -e "$x" ] && ln -sf "$x" gcc64/bin/
-          done
-          for x in /usr/bin/arm-linux-gnueabi-*; do
-            [ -e "$x" ] && ln -sf "$x" gcc32/bin/
-          done
-          aarch64-linux-gnu-gcc --version
-          arm-linux-gnueabi-gcc --version
-          clang --version
-
-      - name: Configure Kernel
-        run: |
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export PYTHON=python2.7
-          
-          # Disable -Werror so minor format warnings don't fail the build
-          find . -name "Makefile" -o -name "Kbuild" | xargs sed -i 's/-Werror//g' || true
-          
-          make O=out RMX1821_defconfig
-          make O=out olddefconfig
-          sed -i '/^CONFIG_DEBUG_INFO=/d;/^CONFIG_DEBUG_INFO_DWARF/d' out/.config
-          echo '# CONFIG_DEBUG_INFO is not set' >> out/.config
-          make O=out olddefconfig
-          test -f out/.config
-          echo "===== CONFIGURATION READY ====="
-
-      - name: Compile Kernel
+      # ============================================================
+      # 2. SOURCE VALIDATION
+      # ============================================================
+      - name: Validate Kernel Source
         shell: bash
         run: |
+          set -e
+
+          echo "=========================================="
+          echo " REALME 3 / 3i KERNEL SOURCE VALIDATION"
+          echo "=========================================="
+
+          test -f Makefile
+          test -d arch/arm64
+          test -f arch/arm64/configs/${DEFCONFIG}
+
+          echo
+          echo "Kernel version:"
+          make kernelversion
+
+          echo
+          echo "Defconfig:"
+          echo "arch/arm64/configs/${DEFCONFIG}"
+
+          echo
+          echo "MT6771 DTS files:"
+          find arch/arm64/boot/dts/mediatek \
+            -type f \
+            \( -name '*6771*.dts' -o -name '*6771*.dtsi' \) \
+            | sort | head -100
+
+          echo
+          echo "RMX1827 references:"
+          grep -RIn \
+            --exclude-dir=.git \
+            'RMX1827' \
+            arch/arm64/boot/dts \
+            arch/arm64/configs \
+            2>/dev/null | head -50 || true
+
+      # ============================================================
+      # 3. PHOENIX CHECK
+      #
+      # DO NOT CREATE A FAKE oppo_phoenix.h.
+      # If source really requires it, stop and show the exact
+      # references instead of producing a misleading kernel.
+      # ============================================================
+      - name: Check Phoenix Dependency
+        shell: bash
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo " PHOENIX DEPENDENCY CHECK"
+          echo "=========================================="
+
+          REFS="$(grep -RIn \
+            --exclude-dir=.git \
+            -E 'oppo_phoenix|oppo_phoenix\.h|vendor/oppo/oppo_phoenix' \
+            . 2>/dev/null || true)"
+
+          if [ -n "$REFS" ]; then
+            echo "Phoenix references found:"
+            echo
+            echo "$REFS"
+            echo
+
+            HEADER_FOUND=0
+
+            while IFS= read -r -d '' HEADER; do
+              echo "Phoenix header found: $HEADER"
+              HEADER_FOUND=1
+            done < <(
+              find . \
+                -path './.git' -prune -o \
+                -type f \
+                -name 'oppo_phoenix.h' \
+                -print0
+            )
+
+            if [ "$HEADER_FOUND" -eq 0 ]; then
+              echo
+              echo "ERROR: Source references oppo_phoenix.h"
+              echo "but the real header is not present."
+              echo
+              echo "No fake header will be generated."
+              exit 1
+            fi
+
+            echo
+            echo "Phoenix dependency appears present."
+          else
+            echo "No Phoenix dependency referenced."
+          fi
+
+      # ============================================================
+      # 4. PACKAGES
+      # ============================================================
+      - name: Install Build Dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            cpio \
+            device-tree-compiler \
+            flex \
+            libelf-dev \
+            libncurses5-dev \
+            libssl-dev \
+            perl \
+            python3 \
+            rsync \
+            unzip \
+            wget \
+            zip
+
+      # ============================================================
+      # 5. DOWNLOAD ANDROID GCC 4.9
+      # ============================================================
+      - name: Download Android GCC 4.9
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$GITHUB_WORKSPACE/toolchains"
+
+          cd "$GITHUB_WORKSPACE/toolchains"
+
+          wget -q --show-progress \
+            'https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/heads/android10-release.tar.gz' \
+            -O gcc64.tar.gz
+
+          mkdir gcc64
+          tar -xzf gcc64.tar.gz -C gcc64
+
+          wget -q --show-progress \
+            'https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/heads/android10-release.tar.gz' \
+            -O gcc32.tar.gz
+
+          mkdir gcc32
+          tar -xzf gcc32.tar.gz -C gcc32
+
+          echo
+          echo "AArch64 GCC:"
+          toolchains/gcc64/bin/aarch64-linux-android-gcc --version | head -1
+
+          echo
+          echo "ARM32 GCC:"
+          toolchains/gcc32/bin/arm-linux-androideabi-gcc --version | head -1
+
+      # ============================================================
+      # 6. PREPARE SOURCE
+      # ============================================================
+      - name: Prepare Source
+        shell: bash
+        run: |
+          set -e
+
+          git config --global core.autocrlf false
+
+          # Only clean the known Python 2 generator if present.
+          if [ -f tools/dct/DrvGen.py ]; then
+            sed -i 's/\r$//' tools/dct/DrvGen.py
+            chmod +x tools/dct/DrvGen.py
+          fi
+
+          echo "Source preparation complete."
+
+      # ============================================================
+      # 7. CREATE CONFIG
+      # ============================================================
+      - name: Configure Kernel
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$GITHUB_WORKSPACE/toolchains/gcc64/bin:$GITHUB_WORKSPACE/toolchains/gcc32/bin:$PATH"
+
           export ARCH=arm64
           export SUBARCH=arm64
-          export PATH="$GITHUB_WORKSPACE/gcc64/bin:$GITHUB_WORKSPACE/gcc32/bin:/usr/bin:$PATH"
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export PYTHON=python2.7
-          echo "========================================"
-          echo "       REALME 3i KERNEL BUILD"
-          echo "========================================"
-          echo "Build started: $(date)"
-          echo ""
-          set +e
-          make -j"$(nproc)" O=out PYTHON=python2.7 2>&1 | tee build.log
-          status=${PIPESTATUS[0]}
-          echo ""
-          echo "Build finished: $(date)"
-          if [ "$status" -ne 0 ]; then
-            echo "========================================"
-            echo "          KERNEL BUILD FAILED"
-            echo "========================================"
-            echo ""
-            echo "===== ERRORS ====="
-            grep -Ei "error:|fatal:|undefined reference|No such file|not found|Error [0-9]+" build.log | tail -n 100 || true
-            echo ""
-            echo "===== LAST 100 LINES ====="
-            tail -n 100 build.log
-            exit "$status"
-          fi
-          echo "========================================"
-          echo "          KERNEL BUILD SUCCESS"
-          echo "========================================"
-          find out/arch/arm64/boot -maxdepth 1 -type f -printf '%f\n'
 
-      - name: Collect Kernel
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+
+          rm -rf out
+          mkdir -p out
+
+          echo "=========================================="
+          echo " CONFIGURING KERNEL"
+          echo "=========================================="
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            "$DEFCONFIG"
+
+          test -f out/.config
+
+          echo
+          echo "Running olddefconfig..."
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            olddefconfig
+
+          echo
+          echo "Config created successfully."
+
+      # ============================================================
+      # 8. CONFIG VALIDATION
+      # ============================================================
+      - name: Validate Config
+        shell: bash
         run: |
-          mkdir -p kernel-output
-          for f in Image Image.gz Image.gz-dtb Image-dtb Image.lz4 Image.lzma Image.xz; do
-            if [ -f "out/arch/arm64/boot/$f" ]; then
-              cp "out/arch/arm64/boot/$f" kernel-output/
+          set -e
+
+          echo "=========================================="
+          echo " CONFIG VALIDATION"
+          echo "=========================================="
+
+          test -f out/.config
+
+          echo
+          echo "Architecture:"
+          grep '^CONFIG_ARM64=' out/.config || true
+
+          echo
+          echo "MTK / MT6771 options:"
+          grep -E \
+            'CONFIG_MTK|CONFIG_MEDIATEK|CONFIG_MACH_MT6771' \
+            out/.config | head -100 || true
+
+          echo
+          echo "DTB options:"
+          grep -E \
+            'CONFIG_BUILD_ARM64|CONFIG_ARM64_APPENDED' \
+            out/.config || true
+
+          echo
+          echo "Config validation complete."
+
+      # ============================================================
+      # 9. BUILD KERNEL
+      # ============================================================
+      - name: Build Kernel
+        shell: bash
+        run: |
+          set -o pipefail
+
+          export PATH="$GITHUB_WORKSPACE/toolchains/gcc64/bin:$GITHUB_WORKSPACE/toolchains/gcc32/bin:$PATH"
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+
+          echo "=========================================="
+          echo " BUILDING KERNEL"
+          echo "=========================================="
+
+          echo
+          echo "Kernel version:"
+          make kernelversion
+
+          echo
+          echo "Compiler:"
+          aarch64-linux-android-gcc --version | head -1
+
+          echo
+          echo "Build started:"
+          date
+
+          make \
+            -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            2>&1 | tee build.log
+
+          echo
+          echo "Build finished:"
+          date
+
+      # ============================================================
+      # 10. BUILD DTBS
+      # ============================================================
+      - name: Build DTBs
+        shell: bash
+        run: |
+          set -e
+
+          export PATH="$GITHUB_WORKSPACE/toolchains/gcc64/bin:$GITHUB_WORKSPACE/toolchains/gcc32/bin:$PATH"
+
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
+
+          make \
+            -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            dtbs
+
+      # ============================================================
+      # 11. VERIFY IMAGE
+      # ============================================================
+      - name: Verify Kernel Image
+        shell: bash
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo " KERNEL OUTPUT"
+          echo "=========================================="
+
+          BOOT="out/arch/arm64/boot"
+
+          test -d "$BOOT"
+
+          echo
+          echo "Boot directory:"
+          find "$BOOT" \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' \
+            | sort
+
+          echo
+          echo "Kernel images:"
+
+          FOUND=0
+
+          for IMAGE in \
+            Image \
+            Image.gz \
+            Image.gz-dtb \
+            Image-dtb
+          do
+            if [ -f "$BOOT/$IMAGE" ]; then
+              echo "FOUND: $BOOT/$IMAGE"
+              ls -lh "$BOOT/$IMAGE"
+              FOUND=1
             fi
           done
-          find out/arch/arm64/boot/dts -type f -name "*.dtb" -exec cp {} kernel-output/ \; 2>/dev/null || true
-          cp build.log kernel-output/
-          echo "===== OUTPUT FILES ====="
-          ls -lh kernel-output
-          test "$(find kernel-output -maxdepth 1 -type f ! -name build.log | wc -l)" -gt 0
 
-      - name: Package Kernel
+          if [ "$FOUND" -eq 0 ]; then
+            echo
+            echo "ERROR: No kernel image was produced."
+            exit 1
+          fi
+
+      # ============================================================
+      # 12. VERIFY MT6771 DTBS
+      # ============================================================
+      - name: Verify MT6771 DTBs
+        shell: bash
         run: |
-          cd kernel-output
-          zip -9 ../Realme3i-Kernel.zip *
-          cd ..
-          echo "===== KERNEL ZIP ====="
-          ls -lh Realme3i-Kernel.zip
+          set -e
 
+          DTB_DIR="out/arch/arm64/boot/dts/mediatek"
+
+          if [ ! -d "$DTB_DIR" ]; then
+            echo "ERROR: DTB directory does not exist."
+            exit 1
+          fi
+
+          echo "=========================================="
+          echo " MT6771 DTB OUTPUT"
+          echo "=========================================="
+
+          find "$DTB_DIR" \
+            -type f \
+            -name '*.dtb' \
+            -printf '%f\n' \
+            | sort
+
+          COUNT="$(find "$DTB_DIR" -type f -name '*.dtb' | wc -l)"
+
+          echo
+          echo "DTB count: $COUNT"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No DTBs were produced."
+            exit 1
+          fi
+
+      # ============================================================
+      # 13. COLLECT ARTIFACTS
+      # ============================================================
+      - name: Collect Kernel
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf kernel-output
+          mkdir -p kernel-output/dtb
+
+          BOOT="out/arch/arm64/boot"
+
+          for IMAGE in \
+            Image \
+            Image.gz \
+            Image.gz-dtb \
+            Image-dtb
+          do
+            if [ -f "$BOOT/$IMAGE" ]; then
+              cp "$BOOT/$IMAGE" kernel-output/
+            fi
+          done
+
+          if [ -d "$BOOT/dts/mediatek" ]; then
+            find "$BOOT/dts/mediatek" \
+              -type f \
+              -name '*.dtb' \
+              -exec cp {} kernel-output/dtb/ \;
+          fi
+
+          cp out/.config kernel-output/kernel.config
+          cp build.log kernel-output/build.log
+
+          echo
+          echo "Collected files:"
+          find kernel-output \
+            -type f \
+            -printf '%p\n' \
+            | sort
+
+      # ============================================================
+      # 14. ZIP
+      # ============================================================
+      - name: Create Release Package
+        shell: bash
+        run: |
+          set -e
+
+          cd kernel-output
+
+          zip -9 -r \
+            ../Realme3i-RMX1827-kernel.zip \
+            .
+
+          cd ..
+
+          ls -lh Realme3i-RMX1827-kernel.zip
+
+      # ============================================================
+      # 15. UPLOAD
+      # ============================================================
       - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: Realme3i-Kernel
+          name: Realme3i-RMX1827-kernel
           path: |
-            Realme3i-Kernel.zip
+            Realme3i-RMX1827-kernel.zip
             kernel-output/build.log
+            kernel-output/kernel.config
+          if-no-files-found: error
