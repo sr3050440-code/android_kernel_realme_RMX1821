@@ -19,7 +19,7 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. CHECKOUT
+      # 1. CHECKOUT EXACT Q SOURCE
       # ============================================================
       - name: Checkout Q Branch
         uses: actions/checkout@v4
@@ -28,16 +28,16 @@ jobs:
           fetch-depth: 1
 
       # ============================================================
-      # 2. SOURCE VALIDATION
+      # 2. CHECK SOURCE
       # ============================================================
-      - name: Validate Kernel Source
+      - name: Validate Source
         shell: bash
         run: |
           set -e
 
-          echo "=========================================="
-          echo " REALME 3 / 3i KERNEL SOURCE VALIDATION"
-          echo "=========================================="
+          echo "========================================"
+          echo " REALME 3 / 3i KERNEL SOURCE"
+          echo "========================================"
 
           test -f Makefile
           test -d arch/arm64
@@ -58,30 +58,19 @@ jobs:
             \( -name '*6771*.dts' -o -name '*6771*.dtsi' \) \
             | sort | head -100
 
-          echo
-          echo "RMX1827 references:"
-          grep -RIn \
-            --exclude-dir=.git \
-            'RMX1827' \
-            arch/arm64/boot/dts \
-            arch/arm64/configs \
-            2>/dev/null | head -50 || true
-
       # ============================================================
       # 3. PHOENIX CHECK
       #
-      # DO NOT CREATE A FAKE oppo_phoenix.h.
-      # If source really requires it, stop and show the exact
-      # references instead of producing a misleading kernel.
+      # NEVER CREATE A FAKE PHOENIX HEADER.
       # ============================================================
       - name: Check Phoenix Dependency
         shell: bash
         run: |
           set -e
 
-          echo "=========================================="
-          echo " PHOENIX DEPENDENCY CHECK"
-          echo "=========================================="
+          echo "========================================"
+          echo " PHOENIX CHECK"
+          echo "========================================"
 
           REFS="$(grep -RIn \
             --exclude-dir=.git \
@@ -89,45 +78,45 @@ jobs:
             . 2>/dev/null || true)"
 
           if [ -n "$REFS" ]; then
+
             echo "Phoenix references found:"
             echo
             echo "$REFS"
             echo
 
-            HEADER_FOUND=0
+            HEADER="$(find . \
+              -path './.git' -prune -o \
+              -type f \
+              -name 'oppo_phoenix.h' \
+              -print -quit)"
 
-            while IFS= read -r -d '' HEADER; do
-              echo "Phoenix header found: $HEADER"
-              HEADER_FOUND=1
-            done < <(
-              find . \
-                -path './.git' -prune -o \
-                -type f \
-                -name 'oppo_phoenix.h' \
-                -print0
-            )
-
-            if [ "$HEADER_FOUND" -eq 0 ]; then
+            if [ -z "$HEADER" ]; then
               echo
-              echo "ERROR: Source references oppo_phoenix.h"
-              echo "but the real header is not present."
+              echo "ERROR:"
+              echo "Source references oppo_phoenix.h"
+              echo "but the real header is missing."
               echo
-              echo "No fake header will be generated."
+              echo "Stopping instead of creating a fake header."
               exit 1
             fi
 
-            echo
-            echo "Phoenix dependency appears present."
+            echo "Real Phoenix header:"
+            echo "$HEADER"
+
           else
-            echo "No Phoenix dependency referenced."
+
+            echo "No Phoenix dependency found."
+
           fi
 
       # ============================================================
-      # 4. PACKAGES
+      # 4. INSTALL BUILD DEPENDENCIES
       # ============================================================
-      - name: Install Build Dependencies
+      - name: Install Dependencies
         shell: bash
         run: |
+          set -e
+
           sudo apt-get update
 
           sudo apt-get install -y \
@@ -137,8 +126,10 @@ jobs:
             cpio \
             device-tree-compiler \
             flex \
+            git \
             libelf-dev \
             libncurses5-dev \
+            libncurses-dev \
             libssl-dev \
             perl \
             python3 \
@@ -148,41 +139,7 @@ jobs:
             zip
 
       # ============================================================
-      # 5. DOWNLOAD ANDROID GCC 4.9
-      # ============================================================
-      - name: Download Android GCC 4.9
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p "$GITHUB_WORKSPACE/toolchains"
-
-          cd "$GITHUB_WORKSPACE/toolchains"
-
-          wget -q --show-progress \
-            'https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/heads/android10-release.tar.gz' \
-            -O gcc64.tar.gz
-
-          mkdir gcc64
-          tar -xzf gcc64.tar.gz -C gcc64
-
-          wget -q --show-progress \
-            'https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/heads/android10-release.tar.gz' \
-            -O gcc32.tar.gz
-
-          mkdir gcc32
-          tar -xzf gcc32.tar.gz -C gcc32
-
-          echo
-          echo "AArch64 GCC:"
-          toolchains/gcc64/bin/aarch64-linux-android-gcc --version | head -1
-
-          echo
-          echo "ARM32 GCC:"
-          toolchains/gcc32/bin/arm-linux-androideabi-gcc --version | head -1
-
-      # ============================================================
-      # 6. PREPARE SOURCE
+      # 5. PREPARE SOURCE
       # ============================================================
       - name: Prepare Source
         shell: bash
@@ -191,7 +148,6 @@ jobs:
 
           git config --global core.autocrlf false
 
-          # Only clean the known Python 2 generator if present.
           if [ -f tools/dct/DrvGen.py ]; then
             sed -i 's/\r$//' tools/dct/DrvGen.py
             chmod +x tools/dct/DrvGen.py
@@ -200,33 +156,128 @@ jobs:
           echo "Source preparation complete."
 
       # ============================================================
-      # 7. CREATE CONFIG
+      # 6. DOWNLOAD ANDROID GCC 4.9
+      #
+      # Clone the actual Google prebuilts instead of extracting
+      # a tarball whose directory layout may differ.
+      # ============================================================
+      - name: Setup Android GCC 4.9
+        shell: bash
+        run: |
+          set -e
+
+          TOOLCHAIN="$GITHUB_WORKSPACE/toolchains"
+
+          rm -rf "$TOOLCHAIN"
+          mkdir -p "$TOOLCHAIN"
+
+          echo "========================================"
+          echo " DOWNLOADING AARCH64 GCC 4.9"
+          echo "========================================"
+
+          git clone \
+            --depth=1 \
+            -b android10-release \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
+            "$TOOLCHAIN/gcc64"
+
+          echo
+          echo "========================================"
+          echo " DOWNLOADING ARM32 GCC 4.9"
+          echo "========================================"
+
+          git clone \
+            --depth=1 \
+            -b android10-release \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
+            "$TOOLCHAIN/gcc32"
+
+          echo
+          echo "Checking AArch64 compiler..."
+
+          test -x \
+            "$TOOLCHAIN/gcc64/bin/aarch64-linux-android-gcc"
+
+          echo "AArch64 compiler: FOUND"
+
+          echo
+          echo "Checking ARM32 compiler..."
+
+          test -x \
+            "$TOOLCHAIN/gcc32/bin/arm-linux-androideabi-gcc"
+
+          echo "ARM32 compiler: FOUND"
+
+          echo
+          echo "AArch64 GCC:"
+          "$TOOLCHAIN/gcc64/bin/aarch64-linux-android-gcc" \
+            --version | head -1
+
+          echo
+          echo "ARM32 GCC:"
+          "$TOOLCHAIN/gcc32/bin/arm-linux-androideabi-gcc" \
+            --version | head -1
+
+      # ============================================================
+      # 7. SETUP COMPILER ENVIRONMENT
+      # ============================================================
+      - name: Setup Compiler Environment
+        shell: bash
+        run: |
+          set -e
+
+          TOOLCHAIN="$GITHUB_WORKSPACE/toolchains"
+
+          echo "$TOOLCHAIN/gcc64/bin" >> "$GITHUB_PATH"
+          echo "$TOOLCHAIN/gcc32/bin" >> "$GITHUB_PATH"
+
+          echo "CROSS_COMPILE=aarch64-linux-android-" >> "$GITHUB_ENV"
+          echo "CROSS_COMPILE_ARM32=arm-linux-androideabi-" >> "$GITHUB_ENV"
+
+          echo "ARCH=arm64" >> "$GITHUB_ENV"
+          echo "SUBARCH=arm64" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # 8. FINAL COMPILER TEST
+      # ============================================================
+      - name: Test Compiler
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================"
+          echo " COMPILER TEST"
+          echo "========================================"
+
+          command -v aarch64-linux-android-gcc
+          command -v arm-linux-androideabi-gcc
+
+          aarch64-linux-android-gcc --version | head -1
+          arm-linux-androideabi-gcc --version | head -1
+
+          echo
+          echo "Compiler test: PASS"
+
+      # ============================================================
+      # 9. CONFIGURE USING EXISTING DEVICE DEFCONFIG
       # ============================================================
       - name: Configure Kernel
         shell: bash
         run: |
           set -e
 
-          export PATH="$GITHUB_WORKSPACE/toolchains/gcc64/bin:$GITHUB_WORKSPACE/toolchains/gcc32/bin:$PATH"
-
-          export ARCH=arm64
-          export SUBARCH=arm64
-
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-
           rm -rf out
           mkdir -p out
 
-          echo "=========================================="
-          echo " CONFIGURING KERNEL"
-          echo "=========================================="
+          echo "========================================"
+          echo " CONFIGURE KERNEL"
+          echo "========================================"
 
           make \
             O=out \
             ARCH=arm64 \
-            CROSS_COMPILE="$CROSS_COMPILE" \
-            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             "$DEFCONFIG"
 
           test -f out/.config
@@ -237,65 +288,57 @@ jobs:
           make \
             O=out \
             ARCH=arm64 \
-            CROSS_COMPILE="$CROSS_COMPILE" \
-            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             olddefconfig
-
-          echo
-          echo "Config created successfully."
-
-      # ============================================================
-      # 8. CONFIG VALIDATION
-      # ============================================================
-      - name: Validate Config
-        shell: bash
-        run: |
-          set -e
-
-          echo "=========================================="
-          echo " CONFIG VALIDATION"
-          echo "=========================================="
 
           test -f out/.config
 
           echo
-          echo "Architecture:"
+          echo "Configuration complete."
+
+      # ============================================================
+      # 10. CONFIG SAFETY CHECK
+      # ============================================================
+      - name: Validate Configuration
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================"
+          echo " CONFIGURATION CHECK"
+          echo "========================================"
+
+          test -f out/.config
+
+          echo
+          echo "ARM64:"
           grep '^CONFIG_ARM64=' out/.config || true
 
           echo
-          echo "MTK / MT6771 options:"
+          echo "MediaTek:"
           grep -E \
             'CONFIG_MTK|CONFIG_MEDIATEK|CONFIG_MACH_MT6771' \
-            out/.config | head -100 || true
+            out/.config \
+            | head -100 || true
 
           echo
-          echo "DTB options:"
+          echo "DTB:"
           grep -E \
             'CONFIG_BUILD_ARM64|CONFIG_ARM64_APPENDED' \
             out/.config || true
 
-          echo
-          echo "Config validation complete."
-
       # ============================================================
-      # 9. BUILD KERNEL
+      # 11. BUILD KERNEL
       # ============================================================
-      - name: Build Kernel
+      - name: Compile Kernel
         shell: bash
         run: |
           set -o pipefail
 
-          export PATH="$GITHUB_WORKSPACE/toolchains/gcc64/bin:$GITHUB_WORKSPACE/toolchains/gcc32/bin:$PATH"
-
-          export ARCH=arm64
-          export SUBARCH=arm64
-
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-
-          echo "=========================================="
-          echo " BUILDING KERNEL"
-          echo "=========================================="
+          echo "========================================"
+          echo " REALME 3i RMX1827 KERNEL BUILD"
+          echo "========================================"
 
           echo
           echo "Kernel version:"
@@ -313,54 +356,70 @@ jobs:
             -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
-            CROSS_COMPILE="$CROSS_COMPILE" \
-            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             2>&1 | tee build.log
 
+          STATUS=${PIPESTATUS[0]}
+
+          if [ "$STATUS" -ne 0 ]; then
+            echo
+            echo "========================================"
+            echo " BUILD FAILED"
+            echo "========================================"
+
+            echo
+            echo "===== IMPORTANT ERRORS ====="
+
+            grep -Ei \
+              'error:|fatal:|No such file|not found|undefined reference|Error [0-9]+' \
+              build.log \
+              | tail -100 || true
+
+            echo
+            echo "===== LAST 100 LINES ====="
+            tail -100 build.log
+
+            exit "$STATUS"
+          fi
+
           echo
-          echo "Build finished:"
-          date
+          echo "========================================"
+          echo " BUILD SUCCESS"
+          echo "========================================"
 
       # ============================================================
-      # 10. BUILD DTBS
+      # 12. BUILD DTBS
       # ============================================================
-      - name: Build DTBs
+      - name: Build Device Trees
         shell: bash
         run: |
           set -e
-
-          export PATH="$GITHUB_WORKSPACE/toolchains/gcc64/bin:$GITHUB_WORKSPACE/toolchains/gcc32/bin:$PATH"
-
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
 
           make \
             -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
-            CROSS_COMPILE="$CROSS_COMPILE" \
-            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
             dtbs
 
       # ============================================================
-      # 11. VERIFY IMAGE
+      # 13. VERIFY KERNEL OUTPUT
       # ============================================================
-      - name: Verify Kernel Image
+      - name: Verify Kernel Output
         shell: bash
         run: |
           set -e
 
-          echo "=========================================="
-          echo " KERNEL OUTPUT"
-          echo "=========================================="
-
           BOOT="out/arch/arm64/boot"
+
+          echo "========================================"
+          echo " KERNEL OUTPUT"
+          echo "========================================"
 
           test -d "$BOOT"
 
-          echo
-          echo "Boot directory:"
           find "$BOOT" \
             -maxdepth 1 \
             -type f \
@@ -368,7 +427,7 @@ jobs:
             | sort
 
           echo
-          echo "Kernel images:"
+          echo "Checking kernel image..."
 
           FOUND=0
 
@@ -379,7 +438,7 @@ jobs:
             Image-dtb
           do
             if [ -f "$BOOT/$IMAGE" ]; then
-              echo "FOUND: $BOOT/$IMAGE"
+              echo "FOUND: $IMAGE"
               ls -lh "$BOOT/$IMAGE"
               FOUND=1
             fi
@@ -387,28 +446,25 @@ jobs:
 
           if [ "$FOUND" -eq 0 ]; then
             echo
-            echo "ERROR: No kernel image was produced."
+            echo "ERROR: Kernel image not produced."
             exit 1
           fi
 
       # ============================================================
-      # 12. VERIFY MT6771 DTBS
+      # 14. VERIFY MT6771 DTBS
       # ============================================================
-      - name: Verify MT6771 DTBs
+      - name: Verify DTBs
         shell: bash
         run: |
           set -e
 
           DTB_DIR="out/arch/arm64/boot/dts/mediatek"
 
-          if [ ! -d "$DTB_DIR" ]; then
-            echo "ERROR: DTB directory does not exist."
-            exit 1
-          fi
+          test -d "$DTB_DIR"
 
-          echo "=========================================="
+          echo "========================================"
           echo " MT6771 DTB OUTPUT"
-          echo "=========================================="
+          echo "========================================"
 
           find "$DTB_DIR" \
             -type f \
@@ -422,19 +478,20 @@ jobs:
           echo "DTB count: $COUNT"
 
           if [ "$COUNT" -eq 0 ]; then
-            echo "ERROR: No DTBs were produced."
+            echo "ERROR: No DTB produced."
             exit 1
           fi
 
       # ============================================================
-      # 13. COLLECT ARTIFACTS
+      # 15. COLLECT
       # ============================================================
-      - name: Collect Kernel
+      - name: Collect Build Output
         shell: bash
         run: |
           set -e
 
           rm -rf kernel-output
+
           mkdir -p kernel-output/dtb
 
           BOOT="out/arch/arm64/boot"
@@ -461,16 +518,19 @@ jobs:
           cp build.log kernel-output/build.log
 
           echo
-          echo "Collected files:"
+          echo "========================================"
+          echo " ARTIFACT CONTENTS"
+          echo "========================================"
+
           find kernel-output \
             -type f \
             -printf '%p\n' \
             | sort
 
       # ============================================================
-      # 14. ZIP
+      # 16. PACKAGE
       # ============================================================
-      - name: Create Release Package
+      - name: Package Kernel
         shell: bash
         run: |
           set -e
@@ -486,9 +546,9 @@ jobs:
           ls -lh Realme3i-RMX1827-kernel.zip
 
       # ============================================================
-      # 15. UPLOAD
+      # 17. UPLOAD
       # ============================================================
-      - name: Upload Kernel
+      - name: Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Realme3i-RMX1827-kernel
