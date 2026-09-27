@@ -8,120 +8,289 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
       - name: Checkout Q branch
         uses: actions/checkout@v4
         with:
           ref: Q
           fetch-depth: 1
 
+      # ============================================================
+      # DEPENDENCIES
+      # ============================================================
       - name: Install build dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           set -eux
+
           sudo apt-get update
+
           sudo apt-get install -y \
-            bc bison build-essential flex \
-            libssl-dev libncurses5-dev libncurses-dev \
-            libelf-dev libgnutls28-dev \
-            clang lld llvm \
-            git zip unzip cpio rsync \
-            python2.7 python2.7-minimal
+            bc \
+            bison \
+            build-essential \
+            flex \
+            libssl-dev \
+            libncurses5-dev \
+            libncurses-dev \
+            libelf-dev \
+            libgnutls28-dev \
+            clang \
+            lld \
+            llvm \
+            git \
+            zip \
+            unzip \
+            cpio \
+            rsync \
+            python2.7 \
+            python2.7-minimal
 
           sudo ln -sf /usr/bin/python2.7 /usr/local/bin/python2
-          python2.7 --version
-          clang --version
-          ld.lld --version
 
+          echo "===== HOST TOOLS ====="
+          gcc --version | head -n 1
+          clang --version | head -n 1
+          ld --version | head -n 1
+          ld.lld --version | head -n 1
+          python2.7 --version
+
+      # ============================================================
+      # SOURCE CHECK
+      # ============================================================
       - name: Check kernel source
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
+
           test -f Makefile
           test -f arch/arm64/configs/RMX1821_defconfig
           test -f tools/dct/DrvGen.py
 
-          echo "===== KERNEL VERSION IN Makefile ====="
-          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)[[:space:]]*=' Makefile
+          echo
+          echo "========================================"
+          echo "KERNEL VERSION"
+          echo "========================================"
 
-          echo "===== IMPORTANT DEFCONFIG ====="
-          grep -E '^(CONFIG_(CROSS_COMPILE|CROSS_COMPILE_ARM32|LOCALVERSION|MACH_MT6771|CMDLINE|BUILD_ARM64_APPENDED_DTB_IMAGE|IMG_GZ_DTB))' \
+          grep -E \
+            '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)[[:space:]]*=' \
+            Makefile || true
+
+          echo
+          echo "========================================"
+          echo "DEFCONFIG"
+          echo "========================================"
+
+          grep -E \
+            '^(CONFIG_(CROSS_COMPILE|CROSS_COMPILE_ARM32|LOCALVERSION|MACH_MT6771|BUILD_ARM64_APPENDED_DTB_IMAGE|IMG_GZ_DTB))=' \
             arch/arm64/configs/RMX1821_defconfig || true
 
-      - name: Check Phoenix dependency
+      # ============================================================
+      # PHOENIX DEPENDENCY CHECK
+      # IMPORTANT:
+      # Do NOT create fake/empty phoenix.h
+      # ============================================================
+      - name: Inspect Phoenix dependency
         shell: bash
         run: |
           set -euo pipefail
 
-          refs="$(grep -RIl --exclude-dir=.git \
-            --exclude='*.o' --exclude='*.a' --exclude='*.so' \
-            'oppo_phoenix\.h' . || true)"
+          echo "========================================"
+          echo "PHOENIX FILES PRESENT IN SOURCE"
+          echo "========================================"
 
-          if [ -n "$refs" ]; then
-            echo "Phoenix header is referenced by:"
-            printf '%s\n' "$refs"
+          find . \
+            -path './.git' -prune -o \
+            -iname '*phoenix*' \
+            -print | sort || true
 
-            if [ ! -f vendor/oppo/oppo_phoenix/kernel/oppo_phoenix/oppo_phoenix.h ]; then
-              echo
-              echo "ERROR: source references oppo_phoenix.h but the real Phoenix dependency is missing."
-              echo "I will NOT create a fake/empty header."
-              exit 1
-            fi
+          echo
+          echo "========================================"
+          echo "PHOENIX HEADER REFERENCES"
+          echo "========================================"
+
+          grep -RIn \
+            --exclude-dir=.git \
+            --exclude-dir=.github \
+            --exclude='*.o' \
+            --exclude='*.a' \
+            --exclude='*.so' \
+            'oppo_phoenix\.h' \
+            . || true
+
+          echo
+          echo "========================================"
+          echo "CHECK REQUIRED HEADER"
+          echo "========================================"
+
+          if [ -f \
+            "drivers/soc/oppo/oppo_phoenix/oppo_phoenix.h" ]; then
+
+            echo "Phoenix header found:"
+            ls -lh \
+              drivers/soc/oppo/oppo_phoenix/oppo_phoenix.h
+
+          elif [ -f \
+            "include/linux/oppo_phoenix.h" ]; then
+
+            echo "Phoenix header found:"
+            ls -lh include/linux/oppo_phoenix.h
+
+          elif [ -f \
+            "vendor/oppo/oppo_phoenix/kernel/oppo_phoenix/oppo_phoenix.h" ]; then
+
+            echo "Phoenix vendor header found:"
+            ls -lh \
+              vendor/oppo/oppo_phoenix/kernel/oppo_phoenix/oppo_phoenix.h
+
           else
-            echo "No oppo_phoenix.h reference found."
+
+            echo
+            echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            echo "PHOENIX DEPENDENCY IS MISSING"
+            echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+            echo
+            echo "kernel/panic.c requires:"
+            echo
+            echo "drivers/soc/oppo/oppo_phoenix/oppo_phoenix.h"
+            echo
+            echo "The source does NOT contain that header."
+            echo
+            echo "NO FAKE HEADER WILL BE CREATED."
+            echo
+            echo "This build is intentionally stopped because"
+            echo "a fake Phoenix header can produce a kernel that"
+            echo "compiles but is not equivalent to the stock kernel."
+            echo
+            exit 1
           fi
 
+      # ============================================================
+      # PREPARE PYTHON SCRIPT
+      # ============================================================
       - name: Prepare source scripts
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
+
           git config --global core.autocrlf false
+
           sed -i 's/\r$//' tools/dct/DrvGen.py
+
           chmod +x tools/dct/DrvGen.py
-          python2.7 -m py_compile tools/dct/DrvGen.py
 
+          python2.7 -m py_compile \
+            tools/dct/DrvGen.py
+
+      # ============================================================
+      # ANDROID GCC 4.9
+      # ============================================================
       - name: Download Android 10 GCC 4.9 toolchains
+        shell: bash
         run: |
-          set -eux
-          rm -rf toolchains
-          mkdir -p toolchains/gcc64 toolchains/gcc32
+          set -euxo pipefail
 
-          git clone --depth=1 --branch android10-release \
+          rm -rf toolchains
+
+          mkdir -p \
+            toolchains/gcc64 \
+            toolchains/gcc32
+
+          git clone \
+            --depth=1 \
+            --branch android10-release \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
             toolchains/gcc64
 
-          git clone --depth=1 --branch android10-release \
+          git clone \
+            --depth=1 \
+            --branch android10-release \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
             toolchains/gcc32
 
-          test -x toolchains/gcc64/bin/aarch64-linux-android-gcc
-          test -x toolchains/gcc64/bin/aarch64-linux-android-ld
-          test -x toolchains/gcc32/bin/arm-linux-androideabi-gcc
-          test -x toolchains/gcc32/bin/arm-linux-androideabi-ld
+          echo
+          echo "========================================"
+          echo "CHECK GCC 64"
+          echo "========================================"
 
+          test -x \
+            toolchains/gcc64/bin/aarch64-linux-android-gcc
+
+          test -x \
+            toolchains/gcc64/bin/aarch64-linux-android-ld
+
+          echo
+          echo "========================================"
+          echo "CHECK GCC 32"
+          echo "========================================"
+
+          test -x \
+            toolchains/gcc32/bin/arm-linux-androideabi-gcc
+
+          test -x \
+            toolchains/gcc32/bin/arm-linux-androideabi-ld
+
+      # ============================================================
+      # COMPILER TEST
+      # ============================================================
       - name: Verify host and target compilers
         shell: bash
         run: |
           set -euxo pipefail
 
-          export GCC64="$GITHUB_WORKSPACE/toolchains/gcc64/bin"
-          export GCC32="$GITHUB_WORKSPACE/toolchains/gcc32/bin"
+          GCC64="$GITHUB_WORKSPACE/toolchains/gcc64/bin"
+          GCC32="$GITHUB_WORKSPACE/toolchains/gcc32/bin"
 
-          echo "===== HOST TOOLS ====="
+          echo
+          echo "========================================"
+          echo "HOST COMPILER"
+          echo "========================================"
+
+          command -v gcc
           command -v clang
           command -v clang++
-          command -v ld.lld
-          command -v gcc
           command -v ld
+          command -v ld.lld
 
-          echo "===== TARGET TOOLS ====="
-          "$GCC64/aarch64-linux-android-gcc" --version | head -n 2
-          "$GCC64/aarch64-linux-android-ld" --version | head -n 2
-          "$GCC32/arm-linux-androideabi-gcc" --version | head -n 2
-          "$GCC32/arm-linux-androideabi-ld" --version | head -n 2
+          echo
+          echo "========================================"
+          echo "AARCH64 GCC"
+          echo "========================================"
 
-          echo "===== TARGET LINKER RESOLUTION ====="
-          "$GCC64/aarch64-linux-android-gcc" -print-prog-name=ld
-          test -x "$GCC64/aarch64-linux-android-ld"
+          "$GCC64/aarch64-linux-android-gcc" \
+            --version | head -n 2
 
+          echo
+          echo "========================================"
+          echo "ARM32 GCC"
+          echo "========================================"
+
+          "$GCC32/arm-linux-androideabi-gcc" \
+            --version | head -n 2
+
+          echo
+          echo "========================================"
+          echo "LINKER"
+          echo "========================================"
+
+          "$GCC64/aarch64-linux-android-gcc" \
+            -print-prog-name=ld
+
+          test -x \
+            "$GCC64/aarch64-linux-android-ld"
+
+          test -x \
+            "$GCC32/arm-linux-androideabi-ld"
+
+          echo
+          echo "Compiler test: PASS"
+
+      # ============================================================
+      # CONFIGURE
+      # ============================================================
       - name: Configure kernel
         shell: bash
         run: |
@@ -131,19 +300,22 @@ jobs:
           export SUBARCH=arm64
           export PYTHON=python2.7
 
-          # IMPORTANT:
-          # Use absolute cross-compiler prefixes so Android GCC tools
-          # never replace the native host compiler/linker used by fixdep.
           export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc64/bin/aarch64-linux-android-"
+
           export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
 
-          # Host tools must be native Ubuntu tools.
+          # HOST tools MUST remain native Ubuntu tools.
           export HOSTCC=clang
           export HOSTCXX=clang++
           export HOSTLD=ld.lld
           export HOSTAR=llvm-ar
 
           rm -rf out
+
+          echo
+          echo "========================================"
+          echo "CONFIGURE KERNEL"
+          echo "========================================"
 
           make O=out \
             ARCH="$ARCH" \
@@ -154,6 +326,11 @@ jobs:
             HOSTLD="$HOSTLD" \
             HOSTAR="$HOSTAR" \
             RMX1821_defconfig
+
+          echo
+          echo "========================================"
+          echo "OLDDEFCONFIG"
+          echo "========================================"
 
           make O=out \
             ARCH="$ARCH" \
@@ -167,10 +344,18 @@ jobs:
 
           test -f out/.config
 
-          echo "===== FINAL CONFIG CHECK ====="
-          grep -E '^(CONFIG_CROSS_COMPILE|CONFIG_CROSS_COMPILE_ARM32|CONFIG_MACH_MT6771|CONFIG_LOCALVERSION|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE|CONFIG_IMG_GZ_DTB)=' \
+          echo
+          echo "========================================"
+          echo "FINAL CONFIG"
+          echo "========================================"
+
+          grep -E \
+            '^(CONFIG_CROSS_COMPILE|CONFIG_CROSS_COMPILE_ARM32|CONFIG_MACH_MT6771|CONFIG_LOCALVERSION|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE|CONFIG_IMG_GZ_DTB)=' \
             out/.config || true
 
+      # ============================================================
+      # BUILD
+      # ============================================================
       - name: Compile kernel
         shell: bash
         run: |
@@ -181,6 +366,7 @@ jobs:
           export PYTHON=python2.7
 
           export CROSS_COMPILE="$GITHUB_WORKSPACE/toolchains/gcc64/bin/aarch64-linux-android-"
+
           export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
 
           export HOSTCC=clang
@@ -188,13 +374,24 @@ jobs:
           export HOSTLD=ld.lld
           export HOSTAR=llvm-ar
 
-          echo "===== FINAL TOOLCHAIN ====="
+          echo
+          echo "========================================"
+          echo "BUILD SETTINGS"
+          echo "========================================"
+
+          echo "ARCH=$ARCH"
           echo "CROSS_COMPILE=$CROSS_COMPILE"
           echo "CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32"
           echo "HOSTCC=$HOSTCC"
           echo "HOSTLD=$HOSTLD"
 
-          make -j"$(nproc)" O=out \
+          echo
+          echo "========================================"
+          echo "BUILD KERNEL"
+          echo "========================================"
+
+          make -j"$(nproc)" \
+            O=out \
             ARCH="$ARCH" \
             CROSS_COMPILE="$CROSS_COMPILE" \
             CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
@@ -205,69 +402,61 @@ jobs:
             PYTHON="$PYTHON" \
             2>&1 | tee build.log
 
+      # ============================================================
+      # VERIFY KERNEL
+      # ============================================================
       - name: Verify kernel output
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "===== KERNEL OUTPUT ====="
-          find out/arch/arm64/boot -maxdepth 2 -type f \
-            \( -name 'Image*' -o -name '*.dtb' -o -name '*.dtbo' \) \
+          echo
+          echo "========================================"
+          echo "KERNEL OUTPUT"
+          echo "========================================"
+
+          find out/arch/arm64/boot \
+            -maxdepth 2 \
+            -type f \
+            \
+              -name 'Image*' \
+              -o -name '*.dtb' \
+              -o -name '*.dtbo' \
+            \
             -printf '%p\n' | sort
 
-          test -s out/arch/arm64/boot/Image
+          test -s \
+            out/arch/arm64/boot/Image
 
-          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+          if [ -f \
+            out/arch/arm64/boot/Image.gz-dtb ]; then
+
             echo "Found Image.gz-dtb"
-          elif [ -f out/arch/arm64/boot/Image.gz ]; then
+
+          elif [ -f \
+            out/arch/arm64/boot/Image.gz ]; then
+
             echo "Found Image.gz"
+
           else
-            echo "ERROR: no Image.gz-dtb or Image.gz was produced."
+
+            echo
+            echo "ERROR: Kernel Image.gz/Image.gz-dtb missing."
             exit 1
+
           fi
 
-          dtb_count="$(find out/arch/arm64/boot/dts -type f -name '*.dtb' | wc -l)"
-          echo "DTB count: $dtb_count"
-          test "$dtb_count" -gt 0
+          DTB_COUNT="$(
+            find out/arch/arm64/boot/dts \
+              -type f \
+              -name '*.dtb' | wc -l
+          )"
 
-      - name: Collect kernel and DTBs
-        shell: bash
-        run: |
-          set -eux
-          rm -rf kernel-output
-          mkdir -p kernel-output/dtb
+          echo "DTB count: $DTB_COUNT"
 
-          for f in \
-            Image Image.gz Image.gz-dtb Image-dtb \
-            Image.lz4 Image.lzma Image.xz; do
-            if [ -f "out/arch/arm64/boot/$f" ]; then
-              cp "out/arch/arm64/boot/$f" kernel-output/
-            fi
-          done
+          test "$DTB_COUNT" -gt 0
 
-          find out/arch/arm64/boot/dts \
-            -type f -name '*.dtb' \
-            -exec cp {} kernel-output/dtb/ \;
-
-          cp out/.config kernel-output/kernel.config
-          cp build.log kernel-output/build.log
-
-          echo "===== ARTIFACT CONTENTS ====="
-          find kernel-output -type f -printf '%p\n' | sort
-
-      - name: Package kernel artifact
-        run: |
-          set -eux
-          cd kernel-output
-          zip -9 -r ../Realme3i-RMX1827-Kernel-Q.zip .
-          cd ..
-          ls -lh Realme3i-RMX1827-Kernel-Q.zip
-
-      - name: Upload kernel artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Realme3i-RMX1827-Kernel-Q
-          path: |
-            Realme3i-RMX1827-Kernel-Q.zip
-            kernel-output/build.log
-            kernel-output/kernel.config
+      # ============================================================
+      # COLLECT OUTPUT
+      # ============================================================
+      -
