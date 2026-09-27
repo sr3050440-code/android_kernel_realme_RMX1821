@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+
       # ============================================================
       # CHECKOUT
       # ============================================================
@@ -21,10 +22,11 @@ jobs:
       # DEPENDENCIES
       # ============================================================
       - name: Install build dependencies
+        shell: bash
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          set -eux
+          set -euxo pipefail
 
           sudo apt-get update
 
@@ -77,11 +79,11 @@ jobs:
 
           grep -E \
             '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)[[:space:]]*=' \
-            Makefile || true
+            Makefile
 
           echo
           echo "========================================"
-          echo "DEFCONFIG"
+          echo "DEVICE DEFCONFIG"
           echo "========================================"
 
           grep -E \
@@ -89,87 +91,143 @@ jobs:
             arch/arm64/configs/RMX1821_defconfig || true
 
       # ============================================================
-      # PHOENIX DEPENDENCY CHECK
+      # DISABLE ONLY PHOENIX
+      #
       # IMPORTANT:
-      # Do NOT create fake/empty phoenix.h
+      # We do NOT disable all VENDOR_EDIT.
+      # We do NOT create fake phoenix.h.
+      #
+      # Phoenix is optional in this source, but the source's
+      # panic.c/init/main.c reference its missing header while
+      # VENDOR_EDIT is globally enabled.
       # ============================================================
-      - name: Inspect Phoenix dependency
+      - name: Disable missing Phoenix dependency
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "========================================"
-          echo "PHOENIX FILES PRESENT IN SOURCE"
-          echo "========================================"
+          python3 <<'PY'
+          from pathlib import Path
 
-          find . \
-            -path './.git' -prune -o \
-            -iname '*phoenix*' \
-            -print | sort || true
+          files = [
+              Path("kernel/panic.c"),
+              Path("init/main.c"),
+          ]
+
+          for path in files:
+              text = path.read_text(encoding="utf-8")
+
+              original = text
+
+              # ----------------------------------------------------
+              # Remove only VENDOR_EDIT blocks that belong to
+              # Phoenix. Other VENDOR_EDIT blocks remain untouched.
+              # ----------------------------------------------------
+              lines = text.splitlines(True)
+
+              out = []
+              i = 0
+
+              while i < len(lines):
+                  line = lines[i]
+
+                  if "#ifdef VENDOR_EDIT" in line:
+                      block = [line]
+                      depth = 1
+                      j = i + 1
+
+                      while j < len(lines):
+                          x = lines[j]
+
+                          if "#ifdef" in x or "#if " in x or "#if(" in x:
+                              depth += 1
+
+                          if "#endif" in x:
+                              depth -= 1
+
+                          block.append(x)
+
+                          if depth == 0:
+                              break
+
+                          j += 1
+
+                      block_text = "".join(block)
+
+                      phoenix_markers = [
+                          "PHOENIX_PROJECT",
+                          "project phoenix",
+                          "phoenix project",
+                          "phx_",
+                          "oppo_phoenix",
+                      ]
+
+                      if any(
+                          marker.lower() in block_text.lower()
+                          for marker in phoenix_markers
+                      ):
+                          print(
+                              f"Removing Phoenix block from {path} "
+                              f"lines {i+1}-{j+1}"
+                          )
+
+                          i = j + 1
+                          continue
+
+                  out.append(line)
+                  i += 1
+
+              text = "".join(out)
+
+              # ----------------------------------------------------
+              # Extra safety: remove a standalone Phoenix include
+              # if one remains.
+              # ----------------------------------------------------
+              filtered = []
+
+              for line in text.splitlines(True):
+                  if "oppo_phoenix/oppo_phoenix.h" in line:
+                      print(
+                          f"Removing Phoenix header include from {path}"
+                      )
+                      continue
+
+                  filtered.append(line)
+
+              text = "".join(filtered)
+
+              if text == original:
+                  print(f"WARNING: no Phoenix change detected in {path}")
+
+              path.write_text(text, encoding="utf-8")
+
+          PY
+
+          # --------------------------------------------------------
+          # Disable Phoenix Kconfig option in generated configuration
+          # --------------------------------------------------------
+          cat > phoenix-disable.fragment <<'EOF'
+          # CONFIG_OPPO_PHOENIX is not set
+          EOF
 
           echo
           echo "========================================"
-          echo "PHOENIX HEADER REFERENCES"
+          echo "VERIFY PHOENIX REFERENCES"
           echo "========================================"
 
           grep -RIn \
             --exclude-dir=.git \
             --exclude-dir=.github \
-            --exclude='*.o' \
-            --exclude='*.a' \
-            --exclude='*.so' \
-            'oppo_phoenix\.h' \
-            . || true
+            'oppo_phoenix\.h\|phx_' \
+            kernel init drivers/soc/oppo/oppo_phoenix \
+            || true
 
           echo
-          echo "========================================"
-          echo "CHECK REQUIRED HEADER"
-          echo "========================================"
-
-          if [ -f \
-            "drivers/soc/oppo/oppo_phoenix/oppo_phoenix.h" ]; then
-
-            echo "Phoenix header found:"
-            ls -lh \
-              drivers/soc/oppo/oppo_phoenix/oppo_phoenix.h
-
-          elif [ -f \
-            "include/linux/oppo_phoenix.h" ]; then
-
-            echo "Phoenix header found:"
-            ls -lh include/linux/oppo_phoenix.h
-
-          elif [ -f \
-            "vendor/oppo/oppo_phoenix/kernel/oppo_phoenix/oppo_phoenix.h" ]; then
-
-            echo "Phoenix vendor header found:"
-            ls -lh \
-              vendor/oppo/oppo_phoenix/kernel/oppo_phoenix/oppo_phoenix.h
-
-          else
-
-            echo
-            echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-            echo "PHOENIX DEPENDENCY IS MISSING"
-            echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-            echo
-            echo "kernel/panic.c requires:"
-            echo
-            echo "drivers/soc/oppo/oppo_phoenix/oppo_phoenix.h"
-            echo
-            echo "The source does NOT contain that header."
-            echo
-            echo "NO FAKE HEADER WILL BE CREATED."
-            echo
-            echo "This build is intentionally stopped because"
-            echo "a fake Phoenix header can produce a kernel that"
-            echo "compiles but is not equivalent to the stock kernel."
-            echo
-            exit 1
-          fi
+          echo "Phoenix source files remain in tree, but the feature"
+          echo "will be disabled in the final kernel configuration."
 
       # ============================================================
-      # PREPARE PYTHON SCRIPT
+      # PREPARE SCRIPTS
       # ============================================================
       - name: Prepare source scripts
         shell: bash
@@ -211,21 +269,11 @@ jobs:
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
             toolchains/gcc32
 
-          echo
-          echo "========================================"
-          echo "CHECK GCC 64"
-          echo "========================================"
-
           test -x \
             toolchains/gcc64/bin/aarch64-linux-android-gcc
 
           test -x \
             toolchains/gcc64/bin/aarch64-linux-android-ld
-
-          echo
-          echo "========================================"
-          echo "CHECK GCC 32"
-          echo "========================================"
 
           test -x \
             toolchains/gcc32/bin/arm-linux-androideabi-gcc
@@ -236,7 +284,7 @@ jobs:
       # ============================================================
       # COMPILER TEST
       # ============================================================
-      - name: Verify host and target compilers
+      - name: Verify compilers
         shell: bash
         run: |
           set -euxo pipefail
@@ -244,10 +292,7 @@ jobs:
           GCC64="$GITHUB_WORKSPACE/toolchains/gcc64/bin"
           GCC32="$GITHUB_WORKSPACE/toolchains/gcc32/bin"
 
-          echo
-          echo "========================================"
-          echo "HOST COMPILER"
-          echo "========================================"
+          echo "===== HOST ====="
 
           command -v gcc
           command -v clang
@@ -256,34 +301,25 @@ jobs:
           command -v ld.lld
 
           echo
-          echo "========================================"
-          echo "AARCH64 GCC"
-          echo "========================================"
+          echo "===== AARCH64 GCC ====="
 
           "$GCC64/aarch64-linux-android-gcc" \
             --version | head -n 2
 
           echo
-          echo "========================================"
-          echo "ARM32 GCC"
-          echo "========================================"
+          echo "===== ARM32 GCC ====="
 
           "$GCC32/arm-linux-androideabi-gcc" \
             --version | head -n 2
 
           echo
-          echo "========================================"
-          echo "LINKER"
-          echo "========================================"
+          echo "===== TARGET LINKERS ====="
 
-          "$GCC64/aarch64-linux-android-gcc" \
-            -print-prog-name=ld
+          "$GCC64/aarch64-linux-android-ld" \
+            --version | head -n 2
 
-          test -x \
-            "$GCC64/aarch64-linux-android-ld"
-
-          test -x \
-            "$GCC32/arm-linux-androideabi-ld"
+          "$GCC32/arm-linux-androideabi-ld" \
+            --version | head -n 2
 
           echo
           echo "Compiler test: PASS"
@@ -304,7 +340,7 @@ jobs:
 
           export CROSS_COMPILE_ARM32="$GITHUB_WORKSPACE/toolchains/gcc32/bin/arm-linux-androideabi-"
 
-          # HOST tools MUST remain native Ubuntu tools.
+          # Native host tools.
           export HOSTCC=clang
           export HOSTCXX=clang++
           export HOSTLD=ld.lld
@@ -314,7 +350,7 @@ jobs:
 
           echo
           echo "========================================"
-          echo "CONFIGURE KERNEL"
+          echo "DEFCONFIG"
           echo "========================================"
 
           make O=out \
@@ -329,8 +365,13 @@ jobs:
 
           echo
           echo "========================================"
-          echo "OLDDEFCONFIG"
+          echo "DISABLE PHOENIX IN CONFIG"
           echo "========================================"
+
+          scripts/kconfig/merge_config.sh \
+            -m \
+            out/.config \
+            phoenix-disable.fragment
 
           make O=out \
             ARCH="$ARCH" \
@@ -346,8 +387,11 @@ jobs:
 
           echo
           echo "========================================"
-          echo "FINAL CONFIG"
+          echo "VERIFY FINAL CONFIG"
           echo "========================================"
+
+          grep '^# CONFIG_OPPO_PHOENIX is not set' \
+            out/.config
 
           grep -E \
             '^(CONFIG_CROSS_COMPILE|CONFIG_CROSS_COMPILE_ARM32|CONFIG_MACH_MT6771|CONFIG_LOCALVERSION|CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE|CONFIG_IMG_GZ_DTB)=' \
@@ -376,7 +420,7 @@ jobs:
 
           echo
           echo "========================================"
-          echo "BUILD SETTINGS"
+          echo "BUILD"
           echo "========================================"
 
           echo "ARCH=$ARCH"
@@ -384,11 +428,6 @@ jobs:
           echo "CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32"
           echo "HOSTCC=$HOSTCC"
           echo "HOSTLD=$HOSTLD"
-
-          echo
-          echo "========================================"
-          echo "BUILD KERNEL"
-          echo "========================================"
 
           make -j"$(nproc)" \
             O=out \
@@ -403,7 +442,7 @@ jobs:
             2>&1 | tee build.log
 
       # ============================================================
-      # VERIFY KERNEL
+      # VERIFY IMAGE
       # ============================================================
       - name: Verify kernel output
         shell: bash
@@ -418,30 +457,29 @@ jobs:
           find out/arch/arm64/boot \
             -maxdepth 2 \
             -type f \
-            \
+            \( \
               -name 'Image*' \
               -o -name '*.dtb' \
               -o -name '*.dtbo' \
-            \
+            \) \
             -printf '%p\n' | sort
 
           test -s \
             out/arch/arm64/boot/Image
 
-          if [ -f \
+          if [ -s \
             out/arch/arm64/boot/Image.gz-dtb ]; then
 
-            echo "Found Image.gz-dtb"
+            echo "FOUND: Image.gz-dtb"
 
-          elif [ -f \
+          elif [ -s \
             out/arch/arm64/boot/Image.gz ]; then
 
-            echo "Found Image.gz"
+            echo "FOUND: Image.gz"
 
           else
 
-            echo
-            echo "ERROR: Kernel Image.gz/Image.gz-dtb missing."
+            echo "ERROR: Image.gz-dtb/Image.gz not found"
             exit 1
 
           fi
@@ -452,11 +490,91 @@ jobs:
               -name '*.dtb' | wc -l
           )"
 
-          echo "DTB count: $DTB_COUNT"
+          echo "DTB COUNT: $DTB_COUNT"
 
           test "$DTB_COUNT" -gt 0
 
       # ============================================================
-      # COLLECT OUTPUT
+      # COLLECT
       # ============================================================
-      -
+      - name: Collect kernel output
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf kernel-output
+
+          mkdir -p kernel-output/dtb
+
+          for f in \
+            Image \
+            Image.gz \
+            Image.gz-dtb \
+            Image-dtb \
+            Image.lz4 \
+            Image.lzma \
+            Image.xz
+          do
+            if [ -f \
+              "out/arch/arm64/boot/$f" ]; then
+
+              cp \
+                "out/arch/arm64/boot/$f" \
+                kernel-output/
+
+            fi
+          done
+
+          find \
+            out/arch/arm64/boot/dts \
+            -type f \
+            -name '*.dtb' \
+            -exec cp {} kernel-output/dtb/ \;
+
+          cp \
+            out/.config \
+            kernel-output/kernel.config
+
+          cp \
+            build.log \
+            kernel-output/build.log
+
+          echo
+          echo "========================================"
+          echo "OUTPUT FILES"
+          echo "========================================"
+
+          find kernel-output \
+            -type f \
+            -printf '%p\n' | sort
+
+      # ============================================================
+      # PACKAGE
+      # ============================================================
+      - name: Package kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd kernel-output
+
+          zip -9 -r \
+            ../Realme3i-RMX1827-Kernel-Q.zip \
+            .
+
+          cd ..
+
+          ls -lh \
+            Realme3i-RMX1827-Kernel-Q.zip
+
+      # ============================================================
+      # UPLOAD
+      # ============================================================
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Realme3i-RMX1827-Kernel-Q
+          path: |
+            Realme3i-RMX1827-Kernel-Q.zip
+            kernel-output/build.log
+            kernel-output/kernel.config
